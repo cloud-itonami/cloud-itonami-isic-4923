@@ -1,0 +1,12 @@
+{:itonami.blueprint/id "cloud-itonami-4923"
+ :itonami.blueprint/name "Freight transport by road"
+ :itonami.blueprint/isic-rev5 "4923"
+ :itonami.blueprint/domain :transport/road-freight
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:supply-chain-resilience :driver-safety :transparency]
+ :itonami.blueprint/governor :road-freight-dispatch-governor
+ :itonami.blueprint/robotics true
+ :itonami.blueprint/required-technologies [:robotics :identity :forms :dmn :bpmn :audit-ledger :logistics]
+ :itonami.blueprint/optional-technologies []
+ :itonami.blueprint/status :public-oss
+ :itonami.blueprint/maturity :implemented}

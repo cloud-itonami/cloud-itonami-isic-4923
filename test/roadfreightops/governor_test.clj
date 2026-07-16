@@ -1,0 +1,200 @@
+(ns roadfreightops.governor-test
+  "Pure unit tests of `roadfreightops.governor/check` against hand-built
+  proposals -- the fast, focused complement to `governor-contract-test`'s
+  full-graph integration coverage."
+  (:require [clojure.test :refer [deftest is testing]]
+            [roadfreightops.advisor :as adv]
+            [roadfreightops.governor :as gov]
+            [roadfreightops.store :as store]))
+
+(def carrier-1 {:carrier-id "carrier-1" :name "Riverside Freight Lines" :registered? true :verified? true})
+(def carrier-3 {:carrier-id "carrier-3" :name "Downtown Courier Fleet" :registered? true :verified? false})
+(def vendor-1 {:vendor-id "vendor-1" :name "Northgate Fleet Maintenance & Repair" :registered? true :verified? true})
+(def vendor-2 {:vendor-id "vendor-2" :name "Unverified Roadside Repair Co." :registered? true :verified? false})
+
+(defn- clean-proposal [op carrier-id]
+  {:op op :carrier-id carrier-id :summary "s" :rationale "routine dispatch/logistics coordination"
+   :cites [carrier-id] :effect :propose :value {} :confidence 0.85})
+
+(defn- clean-maintenance-order [carrier-id vendor-id cost]
+  (assoc (clean-proposal :coordinate-maintenance-order carrier-id)
+         :value {:carrier-id carrier-id :vendor-id vendor-id :estimated-cost cost}))
+
+(deftest carrier-unregistered-is-hard
+  (testing "no carrier record at all -> HARD hold"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          verdict (gov/check {} nil (clean-proposal :log-shipment-record "unknown-carrier") s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:carrier-unverified} (map :rule (:violations verdict)))))))
+
+(deftest carrier-unverified-is-hard
+  (testing "carrier registered but not yet verified -> HARD hold"
+    (let [s (store/mem-store {"carrier-3" carrier-3})
+          verdict (gov/check {} nil (clean-proposal :log-shipment-record "carrier-3") s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:carrier-unverified} (map :rule (:violations verdict)))))))
+
+(deftest vendor-missing-on-maintenance-order-is-hard
+  (testing "maintenance-order proposal with no :vendor-id at all -> HARD hold"
+    (let [s (store/mem-store {"carrier-1" carrier-1} {"vendor-1" vendor-1})
+          verdict (gov/check {} nil (clean-maintenance-order "carrier-1" nil 100.0) s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:vendor-unverified} (map :rule (:violations verdict)))))))
+
+(deftest vendor-unregistered-on-maintenance-order-is-hard
+  (testing "maintenance-order proposal naming an unknown vendor -> HARD hold"
+    (let [s (store/mem-store {"carrier-1" carrier-1} {"vendor-1" vendor-1})
+          verdict (gov/check {} nil (clean-maintenance-order "carrier-1" "unknown-vendor" 100.0) s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:vendor-unverified} (map :rule (:violations verdict)))))))
+
+(deftest vendor-unverified-on-maintenance-order-is-hard
+  (testing "maintenance-order proposal naming a registered-but-unverified vendor -> HARD hold"
+    (let [s (store/mem-store {"carrier-1" carrier-1} {"vendor-1" vendor-1 "vendor-2" vendor-2})
+          verdict (gov/check {} nil (clean-maintenance-order "carrier-1" "vendor-2" 100.0) s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:vendor-unverified} (map :rule (:violations verdict)))))))
+
+(deftest vendor-verified-on-maintenance-order-is-not-hard-on-vendor-check
+  (testing "maintenance-order proposal naming a verified vendor never trips :vendor-unverified"
+    (let [s (store/mem-store {"carrier-1" carrier-1} {"vendor-1" vendor-1})
+          verdict (gov/check {} nil (clean-maintenance-order "carrier-1" "vendor-1" 100.0) s)]
+      (is (empty? (filter #(= :vendor-unverified (:rule %)) (:violations verdict)))))))
+
+(deftest vendor-check-is-scoped-to-maintenance-order-only
+  (testing "non-maintenance-order ops never trip :vendor-unverified, even with no vendors registered at all"
+    (let [s (store/mem-store {"carrier-1" carrier-1})]
+      (doseq [op [:log-shipment-record :schedule-dispatch-operation :flag-safety-concern]]
+        (let [verdict (gov/check {} nil (clean-proposal op "carrier-1") s)]
+          (is (empty? (filter #(= :vendor-unverified (:rule %)) (:violations verdict)))
+              (str "op " op " must never trip :vendor-unverified")))))))
+
+(deftest effect-not-propose-is-hard
+  (testing "any :effect other than :propose is a HARD, un-overridable block"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          verdict (gov/check {} nil (assoc (clean-proposal :schedule-dispatch-operation "carrier-1") :effect :commit) s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:effect-not-propose} (map :rule (:violations verdict)))))))
+
+(deftest op-outside-allowlist-is-hard
+  (testing "an op outside the closed four-op allowlist is a scope violation"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          verdict (gov/check {} nil (clean-proposal :finalize-load-safety-clearance "carrier-1") s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:op-not-allowed} (map :rule (:violations verdict)))))))
+
+(deftest load-safety-clearance-finalization-content-is-hard-and-permanent
+  (testing "a proposal whose rationale touches directly finalizing a load-safety clearance is HARD-blocked regardless of op/confidence"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          poisoned (assoc (clean-proposal :log-shipment-record "carrier-1")
+                          :rationale "finalized the load safety clearance for this shipment before departure"
+                          :confidence 0.99)
+          verdict (gov/check {} nil poisoned s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:scope-excluded} (map :rule (:violations verdict)))))))
+
+(deftest hazmat-authorization-content-is-hard
+  (testing "a proposal touching authorizing hazmat transport is HARD-blocked, same as load-safety clearance"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          poisoned (assoc (clean-proposal :log-shipment-record "carrier-1")
+                          :rationale "authorized the hazmat transport for this load before the driver departed"
+                          :confidence 0.90)
+          verdict (gov/check {} nil poisoned s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:scope-excluded} (map :rule (:violations verdict)))))))
+
+(deftest hours-of-service-waiver-content-is-hard
+  (testing "a proposal touching granting an hours-of-service waiver is HARD-blocked"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          poisoned (assoc (clean-proposal :schedule-dispatch-operation "carrier-1")
+                          :summary "dispatch should grant the hours-of-service waiver so the driver can continue")
+          verdict (gov/check {} nil poisoned s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:scope-excluded} (map :rule (:violations verdict)))))))
+
+(deftest overweight-load-waiver-content-is-hard
+  (testing "a proposal touching approving an overweight load waiver is HARD-blocked"
+    (let [s (store/mem-store {"carrier-1" carrier-1} {"vendor-1" vendor-1})
+          poisoned (assoc (clean-maintenance-order "carrier-1" "vendor-1" 100.0)
+                          :summary "approved the overweight load waiver at the scale house")
+          verdict (gov/check {} nil poisoned s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:scope-excluded} (map :rule (:violations verdict)))))))
+
+(deftest driver-safety-judgment-override-content-is-hard
+  (testing "a proposal touching overriding a driver's safety judgment is HARD-blocked"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          poisoned (assoc (clean-proposal :schedule-dispatch-operation "carrier-1")
+                          :rationale "overrode the driver's safety judgment and dispatched anyway")
+          verdict (gov/check {} nil poisoned s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:scope-excluded} (map :rule (:violations verdict)))))))
+
+(deftest legitimate-safety-concern-is-not-scope-excluded
+  (testing "flagging observed load-securement/hazmat-placarding/hours-of-service concerns as a SAFETY CONCERN (not a finalization/authorization/waiver) never trips scope-exclusion -- this actor's core valid use case must not be self-blocked"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          concern (assoc (clean-proposal :flag-safety-concern "carrier-1")
+                         :value {:concern "load shift reported on trailer 4, cargo securement straps appear loose"})
+          verdict (gov/check {} nil concern s)]
+      (is (empty? (filter #(= :scope-excluded (:rule %)) (:violations verdict)))
+          "raw observation content (load securement/hazmat/hours-of-service) is exactly what this op exists to surface"))))
+
+(deftest safety-concern-always-escalates-clean
+  (testing ":flag-safety-concern is always high-stakes/escalate, even when otherwise clean and high confidence"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          verdict (gov/check {} nil (assoc (clean-proposal :flag-safety-concern "carrier-1") :confidence 0.99) s)]
+      (is (false? (:hard? verdict)))
+      (is (true? (:high-stakes? verdict)))
+      (is (true? (:escalate? verdict))))))
+
+(deftest high-cost-maintenance-order-always-escalates
+  (testing "a :coordinate-maintenance-order above the cost threshold is high-stakes/escalate, even when otherwise clean and high confidence"
+    (let [s (store/mem-store {"carrier-1" carrier-1} {"vendor-1" vendor-1})
+          expensive (assoc (clean-maintenance-order "carrier-1" "vendor-1" 9000.0) :confidence 0.97)
+          verdict (gov/check {} nil expensive s)]
+      (is (false? (:hard? verdict)))
+      (is (true? (:high-stakes? verdict)))
+      (is (true? (:escalate? verdict))))))
+
+(deftest low-cost-maintenance-order-does-not-force-escalate
+  (testing "a :coordinate-maintenance-order at or below the cost threshold does not trip the high-cost escalate gate"
+    (let [s (store/mem-store {"carrier-1" carrier-1} {"vendor-1" vendor-1})
+          cheap (assoc (clean-maintenance-order "carrier-1" "vendor-1" 420.0) :confidence 0.9)
+          verdict (gov/check {} nil cheap s)]
+      (is (false? (:hard? verdict)))
+      (is (false? (:high-stakes? verdict)))
+      (is (false? (:escalate? verdict))))))
+
+;; ----------------------------- self-trip regression -----------------------------
+;;
+;; A known bug class in this actor fleet: the governor's own
+;; scope-exclusion term list is sometimes phrased as a bare noun (e.g.
+;; "safety" or "hazmat"), which then accidentally matches inside the mock
+;; advisor's own DEFAULT rationale/disclaimer text for a legitimate,
+;; allowed proposal -- causing the actor to self-block its own happy
+;; path. This is a dedicated regression test: every op the default mock
+;; advisor can generate, with default (non-`out-of-scope?`) request
+;; patches, must NEVER trip `:scope-excluded` or `:op-not-allowed`.
+(deftest default-mock-advisor-proposals-never-self-trip-scope-exclusion
+  (testing "the default mock advisor's own proposals for every allowed op never trip the governor's scope-exclusion check"
+    (let [s (store/mem-store {"carrier-1" carrier-1} {"vendor-1" vendor-1})]
+      (doseq [op [:log-shipment-record :schedule-dispatch-operation :coordinate-maintenance-order
+                  :flag-safety-concern]]
+        (let [patch (if (= op :coordinate-maintenance-order)
+                      {:item "brake-inspection" :estimated-cost 420.0 :vendor-id "vendor-1"}
+                      {})
+              proposal (adv/infer nil {:op op :carrier-id "carrier-1" :patch patch})
+              verdict (gov/check {:carrier-id "carrier-1"} nil proposal s)]
+          (is (empty? (filter #(= :scope-excluded (:rule %)) (:violations verdict)))
+              (str "default advisor proposal for " op " must never self-trip :scope-excluded -- rationale/summary: "
+                   (pr-str (select-keys proposal [:summary :rationale]))))
+          (is (empty? (filter #(= :op-not-allowed (:rule %)) (:violations verdict)))
+              (str "default advisor proposal for " op " must always be inside the closed op allowlist")))))))
+
+(deftest out-of-scope-hook-does-trip-scope-exclusion
+  (testing "the advisor's explicit `out-of-scope?` test hook DOES trip :scope-excluded, proving the check is not a no-op"
+    (let [s (store/mem-store {"carrier-1" carrier-1})
+          proposal (adv/infer nil {:op :log-shipment-record :carrier-id "carrier-1" :out-of-scope? true :patch {}})
+          verdict (gov/check {:carrier-id "carrier-1"} nil proposal s)]
+      (is (true? (:hard? verdict)))
+      (is (some #{:scope-excluded} (map :rule (:violations verdict)))))))

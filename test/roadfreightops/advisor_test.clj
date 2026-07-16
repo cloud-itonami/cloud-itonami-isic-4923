@@ -1,0 +1,69 @@
+(ns roadfreightops.advisor-test
+  "Unit tests of `roadfreightops.advisor` proposal generation."
+  (:require [clojure.test :refer [deftest is testing]]
+            [roadfreightops.advisor :as adv]
+            [roadfreightops.store :as store]))
+
+(def db (store/seed-db))
+
+(deftest propose-shipment-record-shape
+  (testing "shipment-record proposal has correct shape and fields"
+    (let [p (adv/infer db {:op :log-shipment-record
+                           :carrier-id "carrier-1"
+                           :patch {:bill-of-lading "BOL-1001" :load-weight-kg 12000 :status "delivered"}})]
+      (is (= :log-shipment-record (:op p)))
+      (is (= "carrier-1" (:carrier-id p)))
+      (is (= :propose (:effect p)))
+      (is (<= 0 (:confidence p) 1))
+      (is (map? (:value p)))
+      (is (contains? (:value p) :carrier-id)))))
+
+(deftest propose-dispatch-operation-shape
+  (testing "dispatch-operation proposal has correct shape"
+    (let [p (adv/infer db {:op :schedule-dispatch-operation
+                           :carrier-id "carrier-2"
+                           :patch {:route "I-80-westbound" :date "2026-07-20"}})]
+      (is (= :schedule-dispatch-operation (:op p)))
+      (is (= "carrier-2" (:carrier-id p)))
+      (is (= :propose (:effect p))))))
+
+(deftest propose-maintenance-order-shape
+  (testing "maintenance-order proposal has correct shape"
+    (let [p (adv/infer db {:op :coordinate-maintenance-order
+                           :carrier-id "carrier-1"
+                           :patch {:item "brake-inspection" :quantity 1 :estimated-cost 420.0
+                                   :vendor-id "vendor-1"}})]
+      (is (= :coordinate-maintenance-order (:op p)))
+      (is (= :propose (:effect p)))
+      (is (string? (:summary p)))
+      (is (= "vendor-1" (get-in p [:value :vendor-id]))))))
+
+(deftest propose-safety-concern-shape
+  (testing "safety-concern proposal always escalates"
+    (let [p (adv/infer db {:op :flag-safety-concern
+                           :carrier-id "carrier-1"
+                           :patch {:concern "cargo securement straps appear loose on trailer 4"}})]
+      (is (= :flag-safety-concern (:op p)))
+      (is (= :propose (:effect p)))
+      (is (string? (:summary p))))))
+
+(deftest all-proposals-effect-is-always-propose
+  (testing "every proposal type has :effect :propose, never direct actuation"
+    (doseq [op [:log-shipment-record :schedule-dispatch-operation :coordinate-maintenance-order
+                :flag-safety-concern]]
+      (let [p (adv/infer db {:op op :carrier-id "carrier-1" :patch {}})]
+        (is (= :propose (:effect p))
+            (str "op " op " must have :effect :propose"))))))
+
+(deftest rationale-string-is-present
+  (testing "every proposal has a rationale explaining the advisor's thinking"
+    (doseq [op [:log-shipment-record :schedule-dispatch-operation :coordinate-maintenance-order
+                :flag-safety-concern]]
+      (let [p (adv/infer db {:op op :carrier-id "carrier-1" :patch {}})]
+        (is (string? (:rationale p))
+            (str "op " op " must have a :rationale string"))))))
+
+(deftest out-of-scope-hook-poisons-rationale
+  (testing "the out-of-scope? test hook appends scope-excluded content to the rationale"
+    (let [p (adv/infer db {:op :log-shipment-record :carrier-id "carrier-1" :out-of-scope? true :patch {}})]
+      (is (re-find #"(?i)cleared the load for departure" (:rationale p))))))
