@@ -171,6 +171,10 @@ clojure -M:lint
 
 # Run demo
 clojure -M:run
+
+# Build-time operator console (real actor, no mock HTML)
+clojure -M:dev:render-html
+# -> docs/samples/operator-console.html
 ```
 
 ### Test suite
