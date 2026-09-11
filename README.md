@@ -179,14 +179,14 @@ clojure -M:dev:render-html
 
 ### Test suite
 
-- `test/roadfreightops/governor_test.clj` -- unit tests of governor hard
+- `test/roadfreightops/governor_test.cljk` -- unit tests of governor hard
   checks, scope exclusion, and the self-trip regression test
-- `test/roadfreightops/advisor_test.clj` -- advisor proposal shape and
+- `test/roadfreightops/advisor_test.cljk` -- advisor proposal shape and
   consistency
-- `test/roadfreightops/phase_test.clj` -- rollout phase logic
-- `test/roadfreightops/governor_contract_test.clj` -- full graph
+- `test/roadfreightops/phase_test.cljk` -- rollout phase logic
+- `test/roadfreightops/governor_contract_test.cljk` -- full graph
   integration, audit trail
-- `test/roadfreightops/store_contract_test.clj` -- Store protocol and
+- `test/roadfreightops/store_contract_test.cljk` -- Store protocol and
   MemStore implementation
 
 ### Modules
