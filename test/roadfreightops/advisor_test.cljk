@@ -1,6 +1,6 @@
 (ns roadfreightops.advisor-test
   "Unit tests of `roadfreightops.advisor` proposal generation."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [roadfreightops.advisor :as adv]
             [roadfreightops.store :as store]))
 
